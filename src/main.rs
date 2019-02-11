@@ -87,7 +87,7 @@ fn handle(
                     .arg(deadline_ts.as_secs())
                     .arg(name.clone())
                     .query_async::<_, u8>(conn)
-                    .join(ok((name, true))),
+                    .join(ok((name, has_score, true))),
             ),
 
             (None, true) => Either::A(
@@ -95,33 +95,41 @@ fn handle(
                     .arg(Z_KEY)
                     .arg(name.clone())
                     .query_async::<_, u8>(conn)
-                    .join(ok((name, false))),
+                    .join(ok((name, true, false))),
             ),
-            (None, false) => Either::B(ok(((conn, 0), (name, false)))),
+            (None, false) => {
+                warn!("No deadline and no score, should return 404; name={}", name);
+                Either::B(ok(((conn, 0), (name, false, false))))
+            }
         })
         // Window will only be Some if deadline was Some. See the processing at the start of this
         // function.
-        .and_then(move |((conn, _), (name, has_deadline))| match window {
-            Some(window_ts) => redis::cmd("HSET")
-                .arg(H_KEY)
-                .arg(name.clone())
-                .arg(window_ts.as_secs())
-                .query_async::<_, u8>(conn)
-                .join(ok(has_deadline)),
-            None => redis::cmd("HDEL")
-                .arg(H_KEY)
-                .arg(name)
-                .query_async(conn)
-                .join(ok(has_deadline)),
-        })
+        .and_then(
+            move |((conn, _), (name, has_score, has_deadline))| match window {
+                Some(window_ts) => redis::cmd("HSET")
+                    .arg(H_KEY)
+                    .arg(name.clone())
+                    .arg(window_ts.as_secs())
+                    .query_async::<_, u8>(conn)
+                    .join(ok((has_score, has_deadline))),
+                None => redis::cmd("HDEL")
+                    .arg(H_KEY)
+                    .arg(name)
+                    .query_async(conn)
+                    .join(ok((has_score, has_deadline))),
+            },
+        )
         .map_err(|e| {
             warn!("redis failure; {}", e);
             warp::reject::custom("")
         })
-        .map(|((_, _), has_deadline)| match has_deadline {
-            true => warp::reply::with_status("", StatusCode::CREATED),
-            false => warp::reply::with_status("", StatusCode::OK),
-        })
+        .map(
+            |((_, _), (has_score, has_deadline))| match (has_score, has_deadline) {
+                (_, true) => warp::reply::with_status("", StatusCode::CREATED),
+                (true, false) => warp::reply::with_status("", StatusCode::OK),
+                (false, false) => warp::reply::with_status("", StatusCode::NOT_FOUND),
+            },
+        )
 }
 
 fn main() {
