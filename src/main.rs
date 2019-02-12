@@ -1,15 +1,13 @@
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-use futures::future::ok;
-use futures::future::Either;
+use futures::future::{lazy, ok, Either};
 use futures::Future;
-use log::warn;
+use log::{debug, info, warn};
 use serde_derive::Deserialize;
 use serde_humantime::De;
-use std::time::Duration;
-use warp::filters;
-use warp::http::StatusCode;
-use warp::Filter;
+use tokio::prelude::*;
+use tokio::timer::Interval;
+use warp::{filters, http::StatusCode, Filter};
 
 #[derive(Deserialize)]
 struct Options {
@@ -22,8 +20,67 @@ type ConnFut = redis::RedisFuture<redis::r#async::Connection>;
 const Z_KEY: &'static str = "condemn_z";
 const H_KEY: &'static str = "condemn_h";
 
-fn notify_early_maybe(name: String, window_ts: i64) -> () {
-    warn!("notify early maybe: name={}, ts={}", name, window_ts)
+fn now_ts() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or(Duration::from_secs(0))
+        .as_secs()
+}
+
+fn notify_early_maybe(name: String, window_ts: u64) {
+    let now = now_ts();
+    if window_ts > now {
+        tokio::spawn(lazy(move || {
+            warn!("notify early: name={}, early={}s", name, window_ts - now);
+            ok(())
+        }));
+    } else {
+        info!(
+            "checkin received in window; name={}, ts={}, now={}",
+            name, window_ts, now
+        );
+    }
+}
+
+fn notify_late(name: String) {
+    tokio::spawn(lazy(move || {
+        warn!("notify late: name={}", name);
+        ok(())
+    }));
+}
+
+fn notify_late_all(names: Vec<String>) {
+    let _ = names.into_iter().map(notify_late).count();
+}
+
+fn check_notify(connect: ConnFut) -> impl Future<Item = (), Error = ()> {
+    debug!("check_notify!");
+
+    let now_ts = now_ts();
+
+    connect
+        .and_then(move |conn| {
+            redis::cmd("ZRANGEBYSCORE")
+                .arg(Z_KEY)
+                .arg("-inf")
+                .arg(now_ts)
+                .query_async::<_, Vec<String>>(conn)
+        })
+        .and_then(|(conn, condemned)| match condemned.len() {
+            0 => Either::A(ok(((conn, 0), condemned))),
+            c => {
+                warn!("Removing {} items; [{}]", c, condemned.join(","));
+                Either::B(
+                    redis::cmd("ZREM")
+                        .arg(Z_KEY)
+                        .arg(condemned.clone())
+                        .query_async::<_, u8>(conn)
+                        .join(ok(condemned)),
+                )
+            }
+        })
+        .map_err(|e| warn!("redis failure; {:?}", e))
+        .map(|((_, _), condemned)| notify_late_all(condemned))
 }
 
 fn handle(
@@ -66,7 +123,7 @@ fn handle(
                 redis::cmd("HGET")
                     .arg(H_KEY)
                     .arg(name.clone())
-                    .query_async::<_, Option<i64>>(conn)
+                    .query_async::<_, Option<u64>>(conn)
                     .join(ok((name, score))),
             ),
         })
@@ -135,6 +192,7 @@ fn handle(
 fn main() {
     pretty_env_logger::init();
 
+    let listen = ([127, 0, 0, 1], 3030);
     let client = redis::Client::open("redis://127.0.0.1:6379").unwrap();
     let rds = warp::any().map(move || client.get_async_connection());
 
@@ -145,6 +203,17 @@ fn main() {
         .and_then(handle);
 
     let routes = warp::get2().and(r1).with(filters::log::log("http"));
+    let (_, serve) = warp::serve(routes).bind_ephemeral(listen);
 
-    warp::serve(routes).run(([127, 0, 0, 1], 3030));
+    let client2 = redis::Client::open("redis://127.0.0.1:6379").unwrap();
+
+    let watcher = Interval::new_interval(Duration::from_secs(1))
+        .map(move |_| client2.get_async_connection())
+        .map_err(|_| ())
+        .for_each(|conn| check_notify(conn));
+
+    tokio::run(lazy(|| {
+        tokio::spawn(watcher);
+        serve
+    }));
 }
