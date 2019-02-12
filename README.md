@@ -27,20 +27,24 @@ Requires redis.
 
 ### Configuration
 
-Environment variables. (not implemented yet)
-
 ```
-REDIS_URL=redis://127.0.0.1:6379/0
-LISTEN=127.0.0.1:3030
-Z_KEY=condemn_z
-H_KEY=condemn_h
+USAGE:
+    condemn [OPTIONS]
+
+FLAGS:
+    -h, --help       Prints help information
+    -V, --version    Prints version information
+
+OPTIONS:
+    -l, --listen <listen>          The IP and port to listen on. [env: LISTEN=]  [default: 0.0.0.0:80]
+    -r, --redis-url <redis-url>    The URL for Redis with database; redis://host:port/db [env: REDIS_URL=]  [default:
+                                   redis://127.0.0.1:6379]
 ```
 
 TODO
 ----
 
 - [ ] Implement notifies.
-- [ ] Implement timer.
 - [ ] Test
 
 Future improvements

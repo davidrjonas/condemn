@@ -1,5 +1,7 @@
+use std::net::SocketAddr;
 use std::time::{Duration, SystemTime};
 
+use clap::{crate_authors, crate_version, App, Arg};
 use futures::future::{lazy, ok, Either};
 use futures::Future;
 use log::{debug, info, warn};
@@ -189,11 +191,59 @@ fn handle(
         )
 }
 
+fn valid_listen(v: String) -> Result<(), String> {
+    match v.parse::<SocketAddr>() {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("{}", e)),
+    }
+}
+
+fn valid_redis_url(v: String) -> Result<(), String> {
+    match redis::parse_redis_url(&v) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(format!("unknown format; See help.")),
+    }
+}
+
 fn main() {
     pretty_env_logger::init();
 
-    let listen = ([127, 0, 0, 1], 3030);
-    let client = redis::Client::open("redis://127.0.0.1:6379").unwrap();
+    let app = App::new("condemn")
+        .version(crate_version!())
+        .author(crate_authors!())
+        .arg(
+            Arg::with_name("listen")
+                .short("l")
+                .long("listen")
+                .takes_value(true)
+                .env("LISTEN")
+                .validator(valid_listen)
+                .help("The IP and port to listen on.")
+                .default_value("0.0.0.0:80"),
+        )
+        .arg(
+            Arg::with_name("redis-url")
+                .short("r")
+                .long("redis-url")
+                .takes_value(true)
+                .env("REDIS_URL")
+                .validator(valid_redis_url)
+                .help("The URL for Redis with database; redis://host:port/db")
+                .default_value("redis://127.0.0.1:6379"),
+        )
+        .get_matches();
+
+    let listen: SocketAddr = app
+        .value_of("listen")
+        .expect("--listen should have a default")
+        .parse()
+        .expect("validator missed value of listen");
+
+    let redis_url = app
+        .value_of("redis-url")
+        .expect("redis-url should have default");
+
+    let client = redis::Client::open(redis_url).unwrap();
     let rds = warp::any().map(move || client.get_async_connection());
 
     let r1 = warp::path("switch")
@@ -205,10 +255,10 @@ fn main() {
     let routes = warp::get2().and(r1).with(filters::log::log("http"));
     let (_, serve) = warp::serve(routes).bind_ephemeral(listen);
 
-    let client2 = redis::Client::open("redis://127.0.0.1:6379").unwrap();
+    let watcher_client = redis::Client::open(redis_url).unwrap();
 
     let watcher = Interval::new_interval(Duration::from_secs(1))
-        .map(move |_| client2.get_async_connection())
+        .map(move |_| watcher_client.get_async_connection())
         .map_err(|_| ())
         .for_each(|conn| check_notify(conn));
 
