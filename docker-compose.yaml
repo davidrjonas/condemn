@@ -1,0 +1,15 @@
+version: "3.4"
+
+services:
+  condemn:
+    build:
+      context: ./
+    environment:
+      REDIS_URL: redis://redis:6379/
+      RUST_BACKTRACE: "1"
+      RUST_LOG: condemn=info,http=info
+    ports:
+      - "3030:80"
+
+  redis:
+    image: redis:5
