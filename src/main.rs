@@ -66,7 +66,7 @@ fn check_notify(connect: ConnFut, notifier: Notifier) -> impl Future<Item = (), 
 
 #[derive(Clone)]
 enum Notifier {
-    Command(String),
+    Command(Vec<String>),
     Noop,
 }
 
@@ -79,17 +79,17 @@ impl Notifier {
         }
 
         match self {
-            Notifier::Command(ref cmd) => self.notify_command(cmd, name, early),
+            Notifier::Command(cmd) => self.notify_command(cmd, name, early),
             Notifier::Noop => (),
         }
     }
 
-    fn notify_command(&self, cmd: &str, name: String, early: Option<u64>) {
-        info!("running notify command: cmd={}", cmd);
-        let cmd_array = cmd.split_whitespace().collect::<Vec<&str>>();
+    fn notify_command(&self, cmd: &[String], name: String, early: Option<u64>) {
+        info!("running notify command: cmd={}", cmd.join(" "));
+        //let cmd_array = cmd.split_whitespace().collect::<Vec<&str>>();
 
-        let proc = Command::new(&cmd_array[0])
-            .args(cmd_array[1..].into_iter())
+        let proc = Command::new(&cmd[0])
+            .args(cmd[1..].into_iter())
             .env("CONDEMN_NAME", name)
             .env("CONDEMN_EARLY", format!("{}", early.unwrap_or(0)))
             .spawn_async();
@@ -277,9 +277,10 @@ fn main() {
         .value_of("redis-url")
         .expect("redis-url should have default");
 
-    let notifier = app
-        .value_of("notify")
-        .map_or_else(|| Notifier::Noop, |cmd| Notifier::Command(cmd.to_owned()));
+    let notifier = app.value_of("notify").map_or_else(
+        || Notifier::Noop,
+        |cmd| Notifier::Command(shell_words::split(cmd).unwrap()),
+    );
     let watcher_notifier = notifier.clone();
 
     let client = redis::Client::open(redis_url).unwrap();
