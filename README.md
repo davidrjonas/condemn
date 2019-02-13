@@ -23,7 +23,7 @@ If condemn is called again for your scriptname less than 23h for now it will not
 Set up
 ------
 
-Requires redis.
+Requires redis >= 2.4.
 
 ### Configuration
 
@@ -37,6 +37,8 @@ FLAGS:
 
 OPTIONS:
     -l, --listen <listen>          The IP and port to listen on. [env: LISTEN=]  [default: 0.0.0.0:80]
+    -n, --notify <notify>          Command to run on notify. CONDEMN_NAME env var will be set. If early, CONDEMN_EARLY
+                                   env var will be set to the number of seconds. [env: NOTIFY=]
     -r, --redis-url <redis-url>    The URL for Redis with database; redis://host:port/db [env: REDIS_URL=]  [default:
                                    redis://127.0.0.1:6379]
 ```
@@ -44,10 +46,10 @@ OPTIONS:
 TODO
 ----
 
-- [ ] Implement notifies.
-- [ ] Test
+- [ ] Test(s)
 
 Future improvements
 -------------------
 
 - [ ] Basic auth with username as prefix to all keys
+- [ ] Other notifiers like Slack, OpsGenie, webhook
