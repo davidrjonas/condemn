@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use clap::{crate_authors, crate_version, App, Arg};
@@ -9,6 +10,7 @@ use serde_derive::Deserialize;
 use serde_humantime::De;
 use tokio::prelude::*;
 use tokio::timer::Interval;
+use tokio_process::CommandExt;
 use warp::{filters, http::StatusCode, Filter};
 
 #[derive(Deserialize)]
@@ -29,33 +31,7 @@ fn now_ts() -> u64 {
         .as_secs()
 }
 
-fn notify_early_maybe(name: String, window_ts: u64) {
-    let now = now_ts();
-    if window_ts > now {
-        tokio::spawn(lazy(move || {
-            warn!("notify early: name={}, early={}s", name, window_ts - now);
-            ok(())
-        }));
-    } else {
-        info!(
-            "checkin received in window; name={}, ts={}, now={}",
-            name, window_ts, now
-        );
-    }
-}
-
-fn notify_late(name: String) {
-    tokio::spawn(lazy(move || {
-        warn!("notify late: name={}", name);
-        ok(())
-    }));
-}
-
-fn notify_late_all(names: Vec<String>) {
-    let _ = names.into_iter().map(notify_late).count();
-}
-
-fn check_notify(connect: ConnFut) -> impl Future<Item = (), Error = ()> {
+fn check_notify(connect: ConnFut, notifier: Notifier) -> impl Future<Item = (), Error = ()> {
     debug!("check_notify!");
 
     let now_ts = now_ts();
@@ -68,27 +44,74 @@ fn check_notify(connect: ConnFut) -> impl Future<Item = (), Error = ()> {
                 .arg(now_ts)
                 .query_async::<_, Vec<String>>(conn)
         })
-        .and_then(|(conn, condemned)| match condemned.len() {
-            0 => Either::A(ok(((conn, 0), condemned))),
+        .and_then(move |(conn, condemned)| match condemned.len() {
+            0 => Either::A(ok((conn, 0))),
             c => {
                 warn!("Removing {} items; [{}]", c, condemned.join(","));
+                condemned
+                    .iter()
+                    .map(|name| notifier.notify(name.to_owned(), None))
+                    .count();
                 Either::B(
                     redis::cmd("ZREM")
                         .arg(Z_KEY)
-                        .arg(condemned.clone())
-                        .query_async::<_, u8>(conn)
-                        .join(ok(condemned)),
+                        .arg(condemned)
+                        .query_async::<_, u8>(conn),
                 )
             }
         })
         .map_err(|e| warn!("redis failure; {:?}", e))
-        .map(|((_, _), condemned)| notify_late_all(condemned))
+        .map(|(_, _)| ())
+}
+
+#[derive(Clone)]
+enum Notifier {
+    Command(String),
+    Noop,
+}
+
+impl Notifier {
+    fn notify(&self, name: String, early: Option<u64>) {
+        if let Some(secs) = early {
+            info!("notify early: name={}, early={}s", name, secs);
+        } else {
+            info!("notify late: name={}", name);
+        }
+
+        match self {
+            Notifier::Command(ref cmd) => self.notify_command(cmd, name, early),
+            Notifier::Noop => (),
+        }
+    }
+
+    fn notify_command(&self, cmd: &str, name: String, early: Option<u64>) {
+        info!("running notify command: cmd={}", cmd);
+        let cmd_array = cmd.split_whitespace().collect::<Vec<&str>>();
+
+        let proc = Command::new(&cmd_array[0])
+            .args(cmd_array[1..].into_iter())
+            .env("CONDEMN_NAME", name)
+            .env("CONDEMN_EARLY", format!("{}", early.unwrap_or(0)))
+            .spawn_async();
+
+        tokio::spawn(match proc {
+            Ok(f) => Either::A(
+                f.map(|status| info!("command exited with status {}", status))
+                    .map_err(|e| warn!("failed to wait for exit: {}", e)),
+            ),
+            Err(e) => {
+                warn!("failed to spawn command; {}", e);
+                Either::B(ok(()))
+            }
+        });
+    }
 }
 
 fn handle(
     connect: ConnFut,
     name: String,
     opts: Options,
+    notifier: Notifier,
 ) -> impl Future<Item = warp::reply::WithStatus<&'static str>, Error = warp::Rejection> {
     // First we get the score so that we can make sure this check-in isn't early.
     // If we get a score then also get the window. Possibly notify early if we have a window.
@@ -129,11 +152,14 @@ fn handle(
                     .join(ok((name, score))),
             ),
         })
-        .and_then(|((conn, window), (name, score))| match score {
+        .and_then(move |((conn, window), (name, score))| match score {
             0 => ok((conn, name, false)),
             _ => match window {
                 Some(window_start_ts) => {
-                    notify_early_maybe(name.clone(), window_start_ts);
+                    let now = now_ts();
+                    if window_start_ts > now {
+                        notifier.notify(name.clone(), Some(window_start_ts - now))
+                    }
                     ok((conn, name, true))
                 }
                 None => ok((conn, name, true)),
@@ -231,6 +257,14 @@ fn main() {
                 .help("The URL for Redis with database; redis://host:port/db")
                 .default_value("redis://127.0.0.1:6379"),
         )
+        .arg(
+            Arg::with_name("notify")
+                .short("n")
+                .long("notify")
+                .takes_value(true)
+                .env("NOTIFY")
+                .help("Command to run on notify. NAME env var will be set. If early, EARLY env var will be set to the number of seconds."),
+        )
         .get_matches();
 
     let listen: SocketAddr = app
@@ -243,13 +277,20 @@ fn main() {
         .value_of("redis-url")
         .expect("redis-url should have default");
 
+    let notifier = app
+        .value_of("notify")
+        .map_or_else(|| Notifier::Noop, |cmd| Notifier::Command(cmd.to_owned()));
+    let watcher_notifier = notifier.clone();
+
     let client = redis::Client::open(redis_url).unwrap();
     let rds = warp::any().map(move || client.get_async_connection());
+    let notify_filter = warp::any().map(move || notifier.clone());
 
     let r1 = warp::path("switch")
         .and(rds)
         .and(warp::path::param())
         .and(filters::query::query())
+        .and(notify_filter)
         .and_then(handle);
 
     let routes = warp::get2().and(r1).with(filters::log::log("http"));
@@ -258,9 +299,13 @@ fn main() {
     let watcher_client = redis::Client::open(redis_url).unwrap();
 
     let watcher = Interval::new_interval(Duration::from_secs(1))
-        .map(move |_| watcher_client.get_async_connection())
         .map_err(|_| ())
-        .for_each(|conn| check_notify(conn));
+        .for_each(move |_| {
+            check_notify(
+                watcher_client.get_async_connection(),
+                watcher_notifier.clone(),
+            )
+        });
 
     tokio::run(lazy(|| {
         tokio::spawn(watcher);
