@@ -263,7 +263,7 @@ fn main() {
                 .long("notify")
                 .takes_value(true)
                 .env("NOTIFY")
-                .help("Command to run on notify. NAME env var will be set. If early, EARLY env var will be set to the number of seconds."),
+                .help("Command to run on notify. CONDEMN_NAME env var will be set. If early, CONDEMN_EARLY env var will be set to the number of seconds."),
         )
         .get_matches();
 
