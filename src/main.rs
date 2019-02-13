@@ -231,7 +231,14 @@ fn valid_redis_url(v: String) -> Result<(), String> {
     }
 }
 
-fn main() {
+fn valid_notify_command(v: String) -> Result<(), String> {
+    match shell_words::split(&v) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("{}", e)),
+    }
+}
+
+fn main() -> Result<(), i16> {
     pretty_env_logger::init();
 
     let app = App::new("condemn")
@@ -263,6 +270,7 @@ fn main() {
                 .long("notify")
                 .takes_value(true)
                 .env("NOTIFY")
+                .validator(valid_notify_command)
                 .help("Command to run on notify. CONDEMN_NAME env var will be set. If early, CONDEMN_EARLY env var will be set to the number of seconds."),
         )
         .get_matches();
@@ -279,8 +287,14 @@ fn main() {
 
     let notifier = app.value_of("notify").map_or_else(
         || Notifier::Noop,
-        |cmd| Notifier::Command(shell_words::split(cmd).unwrap()),
+        |s| {
+            Notifier::Command(
+                shell_words::split(s)
+                    .expect("notify command should have been validated. This is a bug."),
+            )
+        },
     );
+
     let watcher_notifier = notifier.clone();
 
     let client = redis::Client::open(redis_url).unwrap();
@@ -312,4 +326,6 @@ fn main() {
         tokio::spawn(watcher);
         serve
     }));
+
+    Ok(())
 }
