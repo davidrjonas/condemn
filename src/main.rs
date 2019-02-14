@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use clap::{crate_authors, crate_version, App, Arg};
@@ -10,8 +9,9 @@ use serde_derive::Deserialize;
 use serde_humantime::De;
 use tokio::prelude::*;
 use tokio::timer::Interval;
-use tokio_process::CommandExt;
 use warp::{filters, http::StatusCode, Filter};
+
+mod notifiers;
 
 #[derive(Deserialize)]
 struct Options {
@@ -31,7 +31,7 @@ fn now_ts() -> u64 {
         .as_secs()
 }
 
-fn check_notify(connect: ConnFut, notifier: Notifier) -> impl Future<Item = (), Error = ()> {
+fn check_notify(connect: ConnFut, notifier: Box<Notifier>) -> impl Future<Item = (), Error = ()> {
     debug!("check_notify!");
 
     let now_ts = now_ts();
@@ -64,46 +64,37 @@ fn check_notify(connect: ConnFut, notifier: Notifier) -> impl Future<Item = (), 
         .map(|(_, _)| ())
 }
 
-#[derive(Clone)]
-enum Notifier {
-    Command(Vec<String>),
-    Noop,
+trait Notifier {
+    fn notify(&self, name: String, early: Option<u64>);
 }
 
-impl Notifier {
+struct AggregateNotifier<'a> {
+    notifiers: Vec<Box<'a + Notifier>>,
+}
+
+impl<'a> AggregateNotifier<'a> {
+    fn push<T: 'a + Notifier>(&mut self, n: T) {
+        self.notifiers.push(Box::new(n));
+    }
+}
+
+impl<'a> Notifier for AggregateNotifier<'a> {
+    fn notify(&self, name: String, early: Option<u64>) {
+        for n in &self.notifiers {
+            n.notify(name.clone(), early);
+        }
+    }
+}
+
+struct LogNotifier {}
+
+impl Notifier for LogNotifier {
     fn notify(&self, name: String, early: Option<u64>) {
         if let Some(secs) = early {
             info!("notify early: name={}, early={}s", name, secs);
         } else {
             info!("notify late: name={}", name);
         }
-
-        match self {
-            Notifier::Command(cmd) => self.notify_command(cmd, name, early),
-            Notifier::Noop => (),
-        }
-    }
-
-    fn notify_command(&self, cmd: &[String], name: String, early: Option<u64>) {
-        info!("running notify command: cmd={}", cmd.join(" "));
-        //let cmd_array = cmd.split_whitespace().collect::<Vec<&str>>();
-
-        let proc = Command::new(&cmd[0])
-            .args(cmd[1..].into_iter())
-            .env("CONDEMN_NAME", name)
-            .env("CONDEMN_EARLY", format!("{}", early.unwrap_or(0)))
-            .spawn_async();
-
-        tokio::spawn(match proc {
-            Ok(f) => Either::A(
-                f.map(|status| info!("command exited with status {}", status))
-                    .map_err(|e| warn!("failed to wait for exit: {}", e)),
-            ),
-            Err(e) => {
-                warn!("failed to spawn command; {}", e);
-                Either::B(ok(()))
-            }
-        });
     }
 }
 
@@ -111,7 +102,7 @@ fn handle(
     connect: ConnFut,
     name: String,
     opts: Options,
-    notifier: Notifier,
+    notifier: Box<Notifier>,
 ) -> impl Future<Item = warp::reply::WithStatus<&'static str>, Error = warp::Rejection> {
     // First we get the score so that we can make sure this check-in isn't early.
     // If we get a score then also get the window. Possibly notify early if we have a window.
@@ -285,21 +276,21 @@ fn main() -> Result<(), i16> {
         .value_of("redis-url")
         .expect("redis-url should have default");
 
-    let notifier = app.value_of("notify").map_or_else(
-        || Notifier::Noop,
-        |s| {
-            Notifier::Command(
-                shell_words::split(s)
-                    .expect("notify command should have been validated. This is a bug."),
-            )
-        },
-    );
+    let notifier = AggregateNotifier { notifiers: vec![] };
+    notifier.push(LogNotifier {});
 
-    let watcher_notifier = notifier.clone();
+    if let Some(s) = app.value_of("notify") {
+        let cmd = shell_words::split(s)
+            .expect("notify command should have been validated. This is a bug.");
+        notifier.push(notifiers::CommandNotifier { cmd });
+    }
+
+    //let watcher_notifier = notifier.clone();
+    let watcher_notifier = Box::new(LogNotifier {});
 
     let client = redis::Client::open(redis_url).unwrap();
     let rds = warp::any().map(move || client.get_async_connection());
-    let notify_filter = warp::any().map(move || notifier.clone());
+    let notify_filter = warp::any().map(move || notifier);
 
     let r1 = warp::path("switch")
         .and(rds)
@@ -315,12 +306,7 @@ fn main() -> Result<(), i16> {
 
     let watcher = Interval::new_interval(Duration::from_secs(1))
         .map_err(|_| ())
-        .for_each(move |_| {
-            check_notify(
-                watcher_client.get_async_connection(),
-                watcher_notifier.clone(),
-            )
-        });
+        .for_each(move |_| check_notify(watcher_client.get_async_connection(), watcher_notifier));
 
     tokio::run(lazy(|| {
         tokio::spawn(watcher);
