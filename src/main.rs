@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use clap::{crate_authors, crate_version, App, Arg};
@@ -31,7 +32,10 @@ fn now_ts() -> u64 {
         .as_secs()
 }
 
-fn check_notify(connect: ConnFut, notifier: Box<Notifier>) -> impl Future<Item = (), Error = ()> {
+fn check_notify(
+    connect: ConnFut,
+    notifier: Arc<AggregateNotifier<'static>>,
+) -> impl Future<Item = (), Error = ()> {
     debug!("check_notify!");
 
     let now_ts = now_ts();
@@ -69,11 +73,11 @@ trait Notifier {
 }
 
 struct AggregateNotifier<'a> {
-    notifiers: Vec<Box<'a + Notifier>>,
+    notifiers: Vec<Box<'a + Notifier + Send + Sync>>,
 }
 
 impl<'a> AggregateNotifier<'a> {
-    fn push<T: 'a + Notifier>(&mut self, n: T) {
+    fn push<T: 'a + Notifier + Send + Sync>(&mut self, n: T) {
         self.notifiers.push(Box::new(n));
     }
 }
@@ -102,7 +106,7 @@ fn handle(
     connect: ConnFut,
     name: String,
     opts: Options,
-    notifier: Box<Notifier>,
+    notifier: Arc<AggregateNotifier<'static>>,
 ) -> impl Future<Item = warp::reply::WithStatus<&'static str>, Error = warp::Rejection> {
     // First we get the score so that we can make sure this check-in isn't early.
     // If we get a score then also get the window. Possibly notify early if we have a window.
@@ -276,7 +280,9 @@ fn main() -> Result<(), i16> {
         .value_of("redis-url")
         .expect("redis-url should have default");
 
-    let notifier = AggregateNotifier { notifiers: vec![] };
+    // ### Notifier
+
+    let mut notifier = AggregateNotifier { notifiers: vec![] };
     notifier.push(LogNotifier {});
 
     if let Some(s) = app.value_of("notify") {
@@ -285,28 +291,41 @@ fn main() -> Result<(), i16> {
         notifier.push(notifiers::CommandNotifier { cmd });
     }
 
-    //let watcher_notifier = notifier.clone();
-    let watcher_notifier = Box::new(LogNotifier {});
+    // Add other notifiers here
+
+    let notifier = Arc::new(notifier);
+    let handle_notifier = Arc::clone(&notifier);
+    let watcher_notifier = Arc::clone(&notifier);
+
+    // ### Warp
 
     let client = redis::Client::open(redis_url).unwrap();
     let rds = warp::any().map(move || client.get_async_connection());
-    let notify_filter = warp::any().map(move || notifier);
 
     let r1 = warp::path("switch")
         .and(rds)
         .and(warp::path::param())
         .and(filters::query::query())
-        .and(notify_filter)
+        .and(warp::any().map(move || Arc::clone(&handle_notifier)))
         .and_then(handle);
 
     let routes = warp::get2().and(r1).with(filters::log::log("http"));
     let (_, serve) = warp::serve(routes).bind_ephemeral(listen);
 
+    // ### Watcher
+
     let watcher_client = redis::Client::open(redis_url).unwrap();
 
     let watcher = Interval::new_interval(Duration::from_secs(1))
         .map_err(|_| ())
-        .for_each(move |_| check_notify(watcher_client.get_async_connection(), watcher_notifier));
+        .for_each(move |_| {
+            check_notify(
+                watcher_client.get_async_connection(),
+                Arc::clone(&watcher_notifier),
+            )
+        });
+
+    // ### All reved up and ready to go
 
     tokio::run(lazy(|| {
         tokio::spawn(watcher);
