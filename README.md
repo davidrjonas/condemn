@@ -46,6 +46,9 @@ Requires redis >= 2.4, necessary for ZREM with multiple keys.
 ### Configuration
 
 ```
+condemn 0.1.0
+David Jonas <djonas@noip.com>
+
 USAGE:
     condemn [OPTIONS]
 
@@ -54,19 +57,33 @@ FLAGS:
     -V, --version    Prints version information
 
 OPTIONS:
-    -l, --listen <listen>          The IP and port to listen on. [env: LISTEN=]  [default: 0.0.0.0:80]
-    -n, --notify <notify>          Command to run on notify. CONDEMN_NAME env var will be set. If early, CONDEMN_EARLY
-                                   env var will be set to the number of seconds. [env: NOTIFY=]
-    -r, --redis-url <redis-url>    The URL for Redis with database; redis://host:port/db [env: REDIS_URL=]  [default:
-                                   redis://127.0.0.1:6379]
+    -l, --listen <listen>                    The IP and port to listen on. [env: LISTEN=]  [default: 0.0.0.0:80]
+    -n, --notify <notify>...                 The notifiers to use. May require other options to be set, such as `sentry-
+                                             dsn`. The Command notifier is configured separately, see `--notify-
+                                             command`. [env: NOTIFY=]  [possible values: sentry]
+    -c, --notify-command <notify-command>    Command to run on notify. CONDEMN_NAME env var will be set. CONDEMN_EARLY
+                                             env var will be set to the number of seconds, 0 if deadlined. [env:
+                                             NOTIFY_COMMAND=]
+    -r, --redis-url <redis-url>              The URL for Redis with database; redis://host:port/db [env: REDIS_URL=]
+                                             [default: redis://127.0.0.1:6379]
+        --sentry-dsn <sentry-dsn>            Configures `sentry` notifier. If notify includes 'sentry', `sentry-dsn` is
+                                             required. [env: SENTRY_DSN=]
 ```
+
+Contributing
+------------
+
+Pull requests welcome!
+
+Notifiers are easy to add. Just implement the `Notifier` trait and add an entry to main() for configuration. See `sentry` as an example.
 
 Future improvements
 -------------------
 
 - [ ] Test(s)
+- [X] Sentry notifier
 - [ ] Basic auth with username as prefix to all keys
-- [ ] Sentry notifier
 - [ ] Other notifiers like Slack, OpsGenie, webhook
 - [ ] Use a transaction with redis / pipeline
 - [ ] Refactor for readability
+- [ ] Add client ip to notifies, other additional context the client may supply, like &ctx={"a":"b"} or &ctx[a]=b&ctx[c]=d

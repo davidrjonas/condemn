@@ -264,9 +264,27 @@ fn main() -> Result<(), i16> {
                 .short("n")
                 .long("notify")
                 .takes_value(true)
+                .multiple(true)
+                .possible_values(&["sentry"])
                 .env("NOTIFY")
+                .help("The notifiers to use. May require other options to be set, such as `sentry-dsn`. The Command notifier is configured separately, see `--notify-command`."),
+        )
+        .arg(
+            Arg::with_name("notify-command")
+                .short("c")
+                .long("notify-command")
+                .takes_value(true)
+                .env("NOTIFY_COMMAND")
                 .validator(valid_notify_command)
-                .help("Command to run on notify. CONDEMN_NAME env var will be set. If early, CONDEMN_EARLY env var will be set to the number of seconds."),
+                .help("Command to run on notify. CONDEMN_NAME env var will be set. CONDEMN_EARLY env var will be set to the number of seconds, 0 if deadlined."),
+        )
+        .arg(
+            Arg::with_name("sentry-dsn")
+                .long("sentry-dsn")
+                .takes_value(true)
+                .env("SENTRY_DSN")
+                .required_if("notify", "sentry")
+                .help("Configures `sentry` notifier. If notify includes 'sentry', `sentry-dsn` is required."),
         )
         .get_matches();
 
@@ -285,13 +303,22 @@ fn main() -> Result<(), i16> {
     let mut notifier = AggregateNotifier { notifiers: vec![] };
     notifier.push(LogNotifier {});
 
-    if let Some(s) = app.value_of("notify") {
+    if let Some(s) = app.value_of("notify-command") {
         let cmd = shell_words::split(s)
             .expect("notify command should have been validated. This is a bug.");
         notifier.push(notifiers::CommandNotifier { cmd });
     }
 
-    // Add other notifiers here
+    for notify in app.values_of("notify").unwrap_or_default() {
+        match notify {
+            "sentry" => notifier.push(notifiers::SentryNotifier::from_dsn(
+                app.value_of("sentry-dsn")
+                    .expect("required if sentry is set"),
+            )),
+            // *** Add other notifiers here ***
+            _ => panic!("unhandled `--notify` type. This is a bug."),
+        }
+    }
 
     let notifier = Arc::new(notifier);
     let handle_notifier = Arc::clone(&notifier);
