@@ -36,10 +36,9 @@ pub struct LogNotifier {}
 
 impl Notifier for LogNotifier {
     fn notify(&self, name: String, early: Option<u64>) {
-        if let Some(secs) = early {
-            info!("notify early: name={}, early={}s", name, secs);
-        } else {
-            info!("notify late: name={}", name);
+        match early {
+            Some(secs) => info!("notify early: name={}, early={}s", name, secs),
+            None => info!("notify late: name={}", name),
         }
     }
 }
