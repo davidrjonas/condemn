@@ -5,7 +5,7 @@ use log::{info, warn};
 use tokio::prelude::*;
 use tokio_process::CommandExt;
 
-use crate::Notifier;
+use crate::notifiers::Notifier;
 
 pub struct Command {
     pub cmd: Vec<String>,

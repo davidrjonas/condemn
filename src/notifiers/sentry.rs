@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use crate::Notifier;
+use crate::notifiers::Notifier;
 use sentry::protocol::Event;
 
 pub struct SentryNotifier {

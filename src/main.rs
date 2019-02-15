@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 use clap::{crate_authors, crate_version, App, Arg};
 use futures::future::{lazy, ok, Either};
 use futures::Future;
-use log::{debug, info, warn};
+use log::{debug, warn};
 use serde_derive::Deserialize;
 use serde_humantime::De;
 use tokio::prelude::*;
@@ -13,6 +13,8 @@ use tokio::timer::Interval;
 use warp::{filters, http::StatusCode, Filter};
 
 mod notifiers;
+
+use notifiers::{AggregateNotifier, Notifier};
 
 #[derive(Deserialize)]
 struct Options {
@@ -66,40 +68,6 @@ fn check_notify(
         })
         .map_err(|e| warn!("redis failure; {:?}", e))
         .map(|(_, _)| ())
-}
-
-trait Notifier {
-    fn notify(&self, name: String, early: Option<u64>);
-}
-
-struct AggregateNotifier<'a> {
-    notifiers: Vec<Box<'a + Notifier + Send + Sync>>,
-}
-
-impl<'a> AggregateNotifier<'a> {
-    fn push<T: 'a + Notifier + Send + Sync>(&mut self, n: T) {
-        self.notifiers.push(Box::new(n));
-    }
-}
-
-impl<'a> Notifier for AggregateNotifier<'a> {
-    fn notify(&self, name: String, early: Option<u64>) {
-        for n in &self.notifiers {
-            n.notify(name.clone(), early);
-        }
-    }
-}
-
-struct LogNotifier {}
-
-impl Notifier for LogNotifier {
-    fn notify(&self, name: String, early: Option<u64>) {
-        if let Some(secs) = early {
-            info!("notify early: name={}, early={}s", name, secs);
-        } else {
-            info!("notify late: name={}", name);
-        }
-    }
 }
 
 fn handle(
@@ -300,8 +268,8 @@ fn main() -> Result<(), i16> {
 
     // ### Notifier
 
-    let mut notifier = AggregateNotifier { notifiers: vec![] };
-    notifier.push(LogNotifier {});
+    let mut notifier = AggregateNotifier::new();
+    notifier.push(notifiers::LogNotifier {});
 
     if let Some(s) = app.value_of("notify-command") {
         let cmd = shell_words::split(s)
