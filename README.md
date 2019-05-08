@@ -41,6 +41,8 @@ Will accept,
 Set up
 ------
 
+Docker image available at https://hub.docker.com/r/davidrjonas/condemn
+
 Requires redis >= 2.4, necessary for ZREM with multiple keys.
 
 ### Configuration
