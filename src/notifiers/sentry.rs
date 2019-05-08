@@ -1,16 +1,20 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
+use log::info;
+
 use crate::notifiers::Notifier;
 use sentry::protocol::Event;
 
 pub struct SentryNotifier {
-    client: sentry::Client,
+    dsn: String,
 }
 
 impl SentryNotifier {
     pub fn from_dsn(dsn: &str) -> Self {
-        SentryNotifier { client: dsn.into() }
+        SentryNotifier {
+            dsn: dsn.to_owned(),
+        }
     }
 }
 
@@ -21,7 +25,9 @@ impl Notifier for SentryNotifier {
 
         let fp = format!("{}={}", name, early.map_or_else(|| "FAIL", |_| "EARLY"));
 
-        self.client.capture_event(
+        let client: sentry::Client = self.dsn.as_str().into();
+
+        let uuid = client.capture_event(
             Event {
                 tags,
                 logger: Some("condemn".to_owned()),
@@ -34,5 +40,9 @@ impl Notifier for SentryNotifier {
             },
             None,
         );
+
+        client.close(None);
+
+        info!("logged to sentry; uuid={}", uuid);
     }
 }

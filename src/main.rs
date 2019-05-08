@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 use clap::{crate_authors, crate_version, App, Arg};
 use futures::future::{lazy, ok, Either};
 use futures::Future;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use serde_derive::Deserialize;
 use serde_humantime::De;
 use tokio::prelude::*;
@@ -321,6 +321,7 @@ fn main() -> Result<(), i16> {
         });
 
     // ### All reved up and ready to go
+    info!("Listening on {}", listen);
 
     tokio::run(lazy(|| {
         tokio::spawn(watcher);
