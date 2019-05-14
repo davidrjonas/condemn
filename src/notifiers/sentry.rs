@@ -1,7 +1,8 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
-use log::info;
+use log::{error, info};
 
 use crate::notifiers::Notifier;
 use sentry::protocol::Event;
@@ -41,8 +42,10 @@ impl Notifier for SentryNotifier {
             None,
         );
 
-        client.close(None);
-
-        info!("logged to sentry; uuid={}", uuid);
+        if client.close(Some(Duration::new(5, 0))) {
+            info!("logged to Sentry; uuid={}", uuid);
+        } else {
+            error!("failed to flush Sentry event; uuid={}", uuid);
+        }
     }
 }
