@@ -1,6 +1,6 @@
 [package]
 name = "condemn"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["David Jonas <djonas@noip.com>"]
 edition = "2018"
 
@@ -8,14 +8,18 @@ edition = "2018"
 chrono = "0.4"
 clap = "2.32"
 futures = "0.1"
-serde-humantime = "0.1"
 log = "0.4"
 pretty_env_logger = "0.3"
 redis = "0.9.0"
-sentry = "0.13"
+sentry = "^0.15"
 serde = "1.0"
+serde-humantime = "0.1"
 serde_derive = "1.0"
 shell-words = "0.1"
 tokio = "0.1.15"
 tokio-process = "0.2"
 warp = "0.1.12"
+
+[[bin]]
+name = "condemn"
+path = "src/main.rs"
