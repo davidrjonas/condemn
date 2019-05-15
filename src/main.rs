@@ -297,8 +297,7 @@ fn main() -> Result<(), i16> {
     let client = redis::Client::open(redis_url).unwrap();
     let rds = warp::any().map(move || client.get_async_connection());
 
-    let r1 = warp::path("/")
-        .and(rds)
+    let r1 = rds
         .and(warp::path::param())
         .and(filters::query::query())
         .and(warp::any().map(move || Arc::clone(&handle_notifier)))
