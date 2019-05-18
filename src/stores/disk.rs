@@ -13,12 +13,12 @@ use parking_lot::RwLock;
 use crate::stores::Store;
 use crate::Switch;
 
-pub struct DiskStore<S: Store> {
+pub struct DiskStore<S: Store + Send + Sync> {
     filename: PathBuf,
     store: Arc<RwLock<S>>,
 }
 
-impl<S: Store> DiskStore<S> {
+impl<S: Store + Send + Sync> DiskStore<S> {
     pub fn new<P: AsRef<Path>>(store: S, filename: P, _load: bool) -> Self {
         Self {
             filename: filename.as_ref().to_path_buf(),
@@ -27,12 +27,15 @@ impl<S: Store> DiskStore<S> {
     }
 }
 
-impl<S: 'static + Store> Store for DiskStore<S> {
-    fn all(&self) -> Box<Future<Item = Vec<Switch>, Error = ()>> {
+impl<S: 'static + Store + Send + Sync> Store for DiskStore<S> {
+    fn all(&self) -> Box<Future<Item = Vec<Switch>, Error = ()> + Send> {
         self.store.read().all()
     }
 
-    fn expired(&mut self, when: DateTime<Utc>) -> Box<Future<Item = Vec<Switch>, Error = ()>> {
+    fn expired(
+        &mut self,
+        when: DateTime<Utc>,
+    ) -> Box<Future<Item = Vec<Switch>, Error = ()> + Send> {
         let filename = self.filename.clone();
         let w = self.store.clone();
 
@@ -49,7 +52,7 @@ impl<S: 'static + Store> Store for DiskStore<S> {
         )
     }
 
-    fn insert(&mut self, s: Switch) -> Box<Future<Item = (), Error = ()>> {
+    fn insert(&mut self, s: Switch) -> Box<Future<Item = (), Error = ()> + Send> {
         let filename = self.filename.clone();
         let r = self.store.clone();
 
@@ -63,7 +66,7 @@ impl<S: 'static + Store> Store for DiskStore<S> {
         Box::new(f)
     }
 
-    fn take(&mut self, name: &str) -> Box<Future<Item = Option<Switch>, Error = ()>> {
+    fn take(&mut self, name: &str) -> Box<Future<Item = Option<Switch>, Error = ()> + Send> {
         let filename = self.filename.clone();
         let r = self.store.clone();
 
