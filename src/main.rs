@@ -1,20 +1,24 @@
+use std::cmp::Ordering;
+use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use clap::{crate_authors, crate_version, App, Arg};
 use futures::future::{lazy, ok, Either};
-use futures::Future;
-use log::{debug, info, warn};
-use serde_derive::Deserialize;
+use futures::{Future, Stream};
+use log::{info, warn};
+use serde_derive::{Deserialize, Serialize};
 use serde_humantime::De;
-use tokio::prelude::*;
 use tokio::timer::Interval;
 use warp::{filters, http::StatusCode, Filter};
 
 mod notifiers;
+mod stores;
 
 use notifiers::{AggregateNotifier, Notifier};
+use stores::{MemoryStore, Store};
 
 #[derive(Deserialize)]
 struct Options {
@@ -22,162 +26,110 @@ struct Options {
     window: De<Option<Duration>>,
 }
 
-type ConnFut = redis::RedisFuture<redis::r#async::Connection>;
-
-const Z_KEY: &'static str = "condemn_z";
-const H_KEY: &'static str = "condemn_h";
-
-fn now_ts() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_secs()
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Switch {
+    name: String,
+    deadline: DateTime<Utc>,
+    window_start: Option<DateTime<Utc>>,
 }
 
-fn check_notify(
-    connect: ConnFut,
+fn store_check_notify<S: Store>(
+    store: Arc<S>,
     notifier: Arc<AggregateNotifier<'static>>,
 ) -> impl Future<Item = (), Error = ()> {
-    debug!("check_notify!");
-
-    let now_ts = now_ts();
-
-    connect
-        .and_then(move |conn| {
-            redis::cmd("ZRANGEBYSCORE")
-                .arg(Z_KEY)
-                .arg("-inf")
-                .arg(now_ts)
-                .query_async::<_, Vec<String>>(conn)
-        })
-        .and_then(move |(conn, condemned)| match condemned.len() {
-            0 => Either::A(ok((conn, 0))),
-            c => {
-                warn!("Removing {} items; [{}]", c, condemned.join(","));
-                condemned
-                    .iter()
-                    .map(|name| notifier.notify(name.to_owned(), None))
-                    .count();
-                Either::B(
-                    redis::cmd("ZREM")
-                        .arg(Z_KEY)
-                        .arg(condemned)
-                        .query_async::<_, u8>(conn),
-                )
-            }
-        })
-        .map_err(|e| warn!("redis failure; {:?}", e))
-        .map(|(_, _)| ())
+    store.expired(Utc::now()).and_then(move |switches| {
+        switches.iter().for_each(|sw| {
+            info!("sw: {:?}", sw);
+            notifier.notify(sw.name.clone(), None)
+        });
+        ok(())
+    })
 }
 
-fn handle(
-    connect: ConnFut,
+fn notify_on_switch(s: &Switch, notifier: Arc<AggregateNotifier<'static>>, checkin_only: bool) {
+    let now = Utc::now();
+
+    match s.deadline.cmp(&now) {
+        Ordering::Less => {
+            // Late?! this shouldn't happen (the switch should have already notified and been
+            // removed). So we should only notify if it looks like this switch is just checking in
+            // and not setting a new switch.
+            if checkin_only {
+                warn!("Late check-in; name={}, deadline={}", s.name, s.deadline);
+                notifier.notify(s.name.clone(), None);
+            }
+        }
+        Ordering::Equal => {
+            // Right on the money? What are the odds. We'll let this count as "within the window"
+            // regardless of the window duration.
+        }
+        Ordering::Greater => {
+            // Check-in before the deadline, that's good. No need to notify unless it is not within the window.
+            s.window_start
+                .filter(|ws| ws > &now)
+                .and_then::<DateTime<Utc>, _>(|ws| {
+                    let secs = ws.timestamp() - now.timestamp();
+                    notifier.notify(s.name.clone(), Some(secs as u64));
+                    None
+                });
+        }
+    }
+}
+
+fn store_handle<S: Store>(
+    store: Arc<S>,
     name: String,
     opts: Options,
     notifier: Arc<AggregateNotifier<'static>>,
 ) -> impl Future<Item = warp::reply::WithStatus<&'static str>, Error = warp::Rejection> {
-    // First we get the score so that we can make sure this check-in isn't early.
-    // If we get a score then also get the window. Possibly notify early if we have a window.
-    // If they set a new deadline, set it, otherwise clear deadline so it doesn't notify later.
-    // If they set a window in addition to the deadline, set that. Clear the window if not to avoid
-    // it being incorrectly set on a future non-window deadline.
+    let deadline = opts.deadline.into_inner();
+    let window = opts.window.into_inner();
+    let checkin_only = deadline.is_none();
+    let later = store.clone();
 
-    // Pre-calculate our timestamps so they can be based on each other and the same "now" easily.
-    let now = SystemTime::now();
-
-    let deadline = opts.deadline.into_inner().map(|dur| {
-        (now + dur)
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or(Duration::from_secs(0))
-    });
-
-    // Use `and_then()` because we may want to replace with None if there is no deadline.
-    let window = opts.window.into_inner().and_then(|dur| match deadline {
-        Some(deadline) => Some(deadline - dur),
-        None => None,
-    });
-
-    connect
-        .and_then(move |conn| {
-            redis::cmd("ZSCORE")
-                .arg(Z_KEY)
-                .arg(name.clone())
-                .query_async::<_, Option<u32>>(conn)
-                .join(ok(name))
-        })
-        .and_then(|((conn, score), name)| match score {
-            None => Either::A(ok(((conn, None), (name, 0)))),
-            Some(score) => Either::B(
-                redis::cmd("HGET")
-                    .arg(H_KEY)
-                    .arg(name.clone())
-                    .query_async::<_, Option<u64>>(conn)
-                    .join(ok((name, score))),
-            ),
-        })
-        .and_then(move |((conn, window), (name, score))| match score {
-            0 => ok((conn, name, false)),
-            _ => match window {
-                Some(window_start_ts) => {
-                    let now = now_ts();
-                    if window_start_ts > now {
-                        notifier.notify(name.clone(), Some(window_start_ts - now))
-                    }
-                    ok((conn, name, true))
+    store
+        .take(&name)
+        .and_then(move |maybe_switch| {
+            let status = match maybe_switch {
+                None => StatusCode::NOT_FOUND,
+                Some(s) => {
+                    notify_on_switch(&s, notifier, checkin_only);
+                    StatusCode::OK
                 }
-                None => ok((conn, name, true)),
-            },
-        })
-        .and_then(move |(conn, name, has_score)| match (deadline, has_score) {
-            (Some(deadline_ts), _) => Either::A(
-                redis::cmd("ZADD")
-                    .arg(Z_KEY)
-                    .arg(deadline_ts.as_secs())
-                    .arg(name.clone())
-                    .query_async::<_, u8>(conn)
-                    .join(ok((name, has_score, true))),
-            ),
+            };
 
-            (None, true) => Either::A(
-                redis::cmd("ZREM")
-                    .arg(Z_KEY)
-                    .arg(name.clone())
-                    .query_async::<_, u8>(conn)
-                    .join(ok((name, true, false))),
-            ),
-            (None, false) => {
-                warn!("No deadline and no score, should return 404; name={}", name);
-                Either::B(ok(((conn, 0), (name, false, false))))
+            match deadline {
+                None => Either::A(ok(status)),
+                Some(deadline) => {
+                    let new_deadline = Utc::now()
+                        .checked_add_signed(chrono::Duration::from_std(deadline).unwrap())
+                        .unwrap();
+
+                    let new_window = window
+                        .map(|d| chrono::Duration::from_std(d).unwrap())
+                        .map(|d| new_deadline.checked_sub_signed(d).unwrap());
+
+                    let s = Switch {
+                        name: name.clone(),
+                        deadline: new_deadline,
+                        window_start: new_window,
+                    };
+
+                    Either::B(later.insert(s).map(|_| StatusCode::CREATED))
+                }
             }
         })
-        // Window will only be Some if deadline was Some. See the processing at the start of this
-        // function.
-        .and_then(
-            move |((conn, _), (name, has_score, has_deadline))| match window {
-                Some(window_ts) => redis::cmd("HSET")
-                    .arg(H_KEY)
-                    .arg(name.clone())
-                    .arg(window_ts.as_secs())
-                    .query_async::<_, u8>(conn)
-                    .join(ok((has_score, has_deadline))),
-                None => redis::cmd("HDEL")
-                    .arg(H_KEY)
-                    .arg(name)
-                    .query_async(conn)
-                    .join(ok((has_score, has_deadline))),
-            },
-        )
-        .map_err(|e| {
-            warn!("redis failure; {}", e);
-            warp::reject::custom("")
-        })
-        .map(
-            |((_, _), (has_score, has_deadline))| match (has_score, has_deadline) {
-                (_, true) => warp::reply::with_status("", StatusCode::CREATED),
-                (true, false) => warp::reply::with_status("", StatusCode::OK),
-                (false, false) => warp::reply::with_status("", StatusCode::NOT_FOUND),
-            },
-        )
+        .map_err(|_| warp::reject::custom("Internal Store Error"))
+        .map(|code| warp::reply::with_status("", code))
+}
+
+fn list_handle<S: Store>(
+    store: Arc<S>,
+) -> impl Future<Item = impl warp::Reply, Error = warp::Rejection> {
+    store
+        .all()
+        .map_err(|_| warp::reject::custom("Internal Store Error"))
+        .map(|data| warp::reply::json(&data))
 }
 
 fn valid_listen(v: String) -> Result<(), String> {
@@ -202,7 +154,11 @@ fn valid_notify_command(v: String) -> Result<(), String> {
 }
 
 fn main() -> Result<(), i16> {
-    pretty_env_logger::init();
+    if env::var_os("RUST_LOG").is_none() {
+        env::set_var("RUST_LOG", "condemn=info");
+    }
+
+    pretty_env_logger::init_timed();
 
     let app = App::new("condemn")
         .version(crate_version!())
@@ -262,7 +218,7 @@ fn main() -> Result<(), i16> {
         .parse()
         .expect("validator missed value of listen");
 
-    let redis_url = app
+    let _redis_url = app
         .value_of("redis-url")
         .expect("redis-url should have default");
 
@@ -294,29 +250,33 @@ fn main() -> Result<(), i16> {
 
     // ### Warp
 
-    let client = redis::Client::open(redis_url).unwrap();
-    let rds = warp::any().map(move || client.get_async_connection());
+    let store = Arc::new(MemoryStore::new());
+    let list_store = Arc::clone(&store);
+    let watcher_store = Arc::clone(&store);
 
-    let r1 = rds
+    // `GET /`
+    let list = warp::get2()
+        .and(warp::any().map(move || Arc::clone(&list_store)))
+        .and_then(list_handle);
+
+    // `GET /:switch`
+    let create = warp::get2()
+        .and(warp::any().map(move || Arc::clone(&store)))
         .and(warp::path::param())
         .and(filters::query::query())
         .and(warp::any().map(move || Arc::clone(&handle_notifier)))
-        .and_then(handle);
+        .and_then(store_handle);
 
-    let routes = warp::get2().and(r1).with(filters::log::log("http"));
+    // `create` must come first or `list` will capture everything.
+    let routes = create.or(list).with(warp::log("condemn"));
     let (_, serve) = warp::serve(routes).bind_ephemeral(listen);
 
     // ### Watcher
 
-    let watcher_client = redis::Client::open(redis_url).unwrap();
-
     let watcher = Interval::new_interval(Duration::from_secs(1))
         .map_err(|_| ())
         .for_each(move |_| {
-            check_notify(
-                watcher_client.get_async_connection(),
-                Arc::clone(&watcher_notifier),
-            )
+            store_check_notify(Arc::clone(&watcher_store), Arc::clone(&watcher_notifier))
         });
 
     // ### All reved up and ready to go
