@@ -3,33 +3,31 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use futures::future::ok;
 use futures::Future;
-use parking_lot::RwLock;
 
 use crate::stores::Store;
 use crate::Switch;
 
-pub struct DiskStore<S: Store + Send + Sync> {
+pub struct DiskStore<S: Store> {
     filename: PathBuf,
-    store: Arc<RwLock<S>>,
+    store: S,
 }
 
-impl<S: Store + Send + Sync> DiskStore<S> {
+impl<S: Clone + Store + Send + Sync> DiskStore<S> {
     pub fn new<P: AsRef<Path>>(store: S, filename: P, _load: bool) -> Self {
         Self {
             filename: filename.as_ref().to_path_buf(),
-            store: Arc::new(RwLock::new(store)),
+            store: store,
         }
     }
 }
 
-impl<S: 'static + Store + Send + Sync> Store for DiskStore<S> {
+impl<S: 'static + Clone + Store + Send + Sync> Store for DiskStore<S> {
     fn all(&self) -> Box<Future<Item = Vec<Switch>, Error = ()> + Send> {
-        self.store.read().all()
+        self.store.all()
     }
 
     fn expired(&self, when: DateTime<Utc>) -> Box<Future<Item = Vec<Switch>, Error = ()> + Send> {
@@ -39,13 +37,12 @@ impl<S: 'static + Store + Send + Sync> Store for DiskStore<S> {
         // Sync before pop'ing off the expired ones. Better safe than sorry.
         Box::new(
             self.store
-                .read()
                 .all()
                 .and_then(move |data: Vec<Switch>| {
                     write_switches(filename, &data).unwrap();
                     ok(())
                 })
-                .and_then(move |_| w.write().expired(when)),
+                .and_then(move |_| w.expired(when)),
         )
     }
 
@@ -53,8 +50,8 @@ impl<S: 'static + Store + Send + Sync> Store for DiskStore<S> {
         let filename = self.filename.clone();
         let r = self.store.clone();
 
-        let f = self.store.write().insert(s).and_then(move |_| {
-            r.read().all().and_then(|data: Vec<Switch>| {
+        let f = self.store.insert(s).and_then(move |_| {
+            r.all().and_then(|data: Vec<Switch>| {
                 write_switches(filename, &data).unwrap();
                 ok(())
             })
@@ -68,8 +65,8 @@ impl<S: 'static + Store + Send + Sync> Store for DiskStore<S> {
         let r = self.store.clone();
 
         // Sync _after_ the take() here. Why? Because we expect it to be gone.
-        let f = self.store.write().take(name).and_then(move |s| {
-            r.read().all().and_then(move |data: Vec<Switch>| {
+        let f = self.store.take(name).and_then(move |s| {
+            r.all().and_then(move |data: Vec<Switch>| {
                 write_switches(filename, &data).unwrap();
                 ok(s)
             })
@@ -91,6 +88,7 @@ fn write_file<P: AsRef<Path>>(filename: P, data: &[u8]) -> Result<(), std::io::E
     OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(true)
         .open(filename)?
         .write_all(data)
 }
