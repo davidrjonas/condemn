@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use clap::{crate_authors, crate_version, App, Arg};
-use futures::future::{lazy, ok, Either};
+use futures::future::{ok, Either};
 use futures::{Future, Stream};
 use log::{info, warn};
 use serde_derive::{Deserialize, Serialize};
@@ -18,7 +18,7 @@ mod notifiers;
 mod stores;
 
 use notifiers::{AggregateNotifier, Notifier};
-use stores::{MemoryStore, Store};
+use stores::{Store, Stores};
 
 #[derive(Deserialize)]
 struct Options {
@@ -184,6 +184,14 @@ fn main() -> Result<(), i16> {
                 .default_value("redis://127.0.0.1:6379"),
         )
         .arg(
+            Arg::with_name("db-file")
+                .short("f")
+                .long("db-file")
+                .takes_value(true)
+                .env("DB_FILE")
+                .help("Path to persistent data file"),
+        )
+        .arg(
             Arg::with_name("notify")
                 .short("n")
                 .long("notify")
@@ -218,6 +226,8 @@ fn main() -> Result<(), i16> {
         .parse()
         .expect("validator missed value of listen");
 
+    let persist = app.value_of("db-file");
+
     let _redis_url = app
         .value_of("redis-url")
         .expect("redis-url should have default");
@@ -250,7 +260,12 @@ fn main() -> Result<(), i16> {
 
     // ### Warp
 
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(match persist {
+        None => Stores::memory(),
+        Some(filename) => Stores::disk(filename),
+    });
+
+    let init_store = Arc::clone(&store);
     let list_store = Arc::clone(&store);
     let watcher_store = Arc::clone(&store);
 
@@ -282,7 +297,7 @@ fn main() -> Result<(), i16> {
     // ### All reved up and ready to go
     info!("Listening on {}", listen);
 
-    tokio::run(lazy(|| {
+    tokio::run(init_store.init().and_then(|_| {
         tokio::spawn(watcher);
         serve
     }));

@@ -1,23 +1,24 @@
-#![allow(dead_code)]
-
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use futures::future::ok;
+use futures::future::{err, ok, Either};
+use futures::stream::Stream;
 use futures::Future;
+use log::{info, warn};
 
 use crate::stores::Store;
 use crate::Switch;
 
+#[derive(Debug)]
 pub struct DiskStore<S: Store> {
     filename: PathBuf,
     store: S,
 }
 
-impl<S: Clone + Store + Send + Sync> DiskStore<S> {
-    pub fn new<P: AsRef<Path>>(store: S, filename: P, _load: bool) -> Self {
+impl<S: 'static + Clone + Store + Send + Sync> DiskStore<S> {
+    pub fn new<P: AsRef<Path>>(store: S, filename: P) -> Self {
         Self {
             filename: filename.as_ref().to_path_buf(),
             store: store,
@@ -26,6 +27,44 @@ impl<S: Clone + Store + Send + Sync> DiskStore<S> {
 }
 
 impl<S: 'static + Clone + Store + Send + Sync> Store for DiskStore<S> {
+    fn init(&self) -> Box<Future<Item = (), Error = ()> + Send> {
+        info!("Loading data from '{:?}'", self.filename);
+
+        let r = self.store.clone();
+        let filename = self.filename.clone();
+
+        let result: Result<Vec<Switch>, _> = OpenOptions::new()
+            .read(true)
+            .open(&self.filename)
+            .and_then(|fh| {
+                Ok(serde_json::from_reader(fh).unwrap_or_else(|e| {
+                    warn!("failed to deserialize db file '{:?}'; {}", self.filename, e);
+                    vec![]
+                }))
+            });
+
+        let f = match result {
+            Err(e) => Either::A({
+                warn!("failed to open db file '{:?}'; {}", self.filename, e);
+                err(())
+            }),
+            Ok(data) => Either::B(
+                futures::stream::futures_unordered(
+                    data.into_iter().map(|sw: Switch| self.store.insert(sw)),
+                )
+                .collect()
+                .and_then(move |_| {
+                    r.all().and_then(|data: Vec<Switch>| {
+                        write_switches(filename, &data).unwrap();
+                        ok(())
+                    })
+                }),
+            ),
+        };
+
+        Box::new(f)
+    }
+
     fn all(&self) -> Box<Future<Item = Vec<Switch>, Error = ()> + Send> {
         self.store.all()
     }
