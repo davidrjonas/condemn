@@ -1,10 +1,10 @@
-#![allow(dead_code)]
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use futures::future::ok;
 use futures::Future;
+use log::debug;
 use parking_lot::RwLock;
 
 use crate::stores::Store;
@@ -39,26 +39,33 @@ impl Store for MemoryStore {
         Box::new(ok(all))
     }
 
-    fn expired(
-        &mut self,
-        when: DateTime<Utc>,
-    ) -> Box<Future<Item = Vec<Switch>, Error = ()> + Send> {
+    fn expired(&self, when: DateTime<Utc>) -> Box<Future<Item = Vec<Switch>, Error = ()> + Send> {
         let switches = self.switches.clone();
 
-        let expired: Vec<Switch> = self
+        let expired: Vec<i64> = self
             .ordered
-            .write()
-            .range_mut(0..when.timestamp())
-            .map(|(_, v)| v)
-            .flatten()
-            .filter_map(|name| switches.write().remove(name))
+            .read()
+            .range(0..when.timestamp())
+            .map(|(k, _)| *k)
             .collect();
 
-        Box::new(ok(expired))
+        let condemned: Vec<Switch> = expired
+            .iter()
+            .filter_map(|k| self.ordered.write().remove(k))
+            .flatten()
+            .filter_map(|name: String| switches.write().remove(&name))
+            .collect();
+
+        debug!("condemned: {}", serde_json::to_string(&condemned).unwrap());
+        Box::new(ok(condemned))
     }
 
-    fn insert(&mut self, s: Switch) -> Box<Future<Item = (), Error = ()> + Send> {
+    fn insert(&self, s: Switch) -> Box<Future<Item = (), Error = ()> + Send> {
+        debug!("inserting: {:?}", s);
+
         self.switches.write().insert(s.name.clone(), s.clone());
+
+        debug!("switches: {:?}", self.switches);
 
         self.ordered
             .write()
@@ -66,10 +73,12 @@ impl Store for MemoryStore {
             .or_default()
             .push(s.name.clone());
 
+        debug!("ordered: {:?}", self.ordered);
+
         Box::new(futures::future::ok(()))
     }
 
-    fn take(&mut self, name: &str) -> Box<Future<Item = Option<Switch>, Error = ()> + Send> {
+    fn take(&self, name: &str) -> Box<Future<Item = Option<Switch>, Error = ()> + Send> {
         let s = self.switches.write().remove(name);
         Box::new(ok(s))
     }

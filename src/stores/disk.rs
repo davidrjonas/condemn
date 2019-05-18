@@ -32,10 +32,7 @@ impl<S: 'static + Store + Send + Sync> Store for DiskStore<S> {
         self.store.read().all()
     }
 
-    fn expired(
-        &mut self,
-        when: DateTime<Utc>,
-    ) -> Box<Future<Item = Vec<Switch>, Error = ()> + Send> {
+    fn expired(&self, when: DateTime<Utc>) -> Box<Future<Item = Vec<Switch>, Error = ()> + Send> {
         let filename = self.filename.clone();
         let w = self.store.clone();
 
@@ -52,7 +49,7 @@ impl<S: 'static + Store + Send + Sync> Store for DiskStore<S> {
         )
     }
 
-    fn insert(&mut self, s: Switch) -> Box<Future<Item = (), Error = ()> + Send> {
+    fn insert(&self, s: Switch) -> Box<Future<Item = (), Error = ()> + Send> {
         let filename = self.filename.clone();
         let r = self.store.clone();
 
@@ -66,7 +63,7 @@ impl<S: 'static + Store + Send + Sync> Store for DiskStore<S> {
         Box::new(f)
     }
 
-    fn take(&mut self, name: &str) -> Box<Future<Item = Option<Switch>, Error = ()> + Send> {
+    fn take(&self, name: &str) -> Box<Future<Item = Option<Switch>, Error = ()> + Send> {
         let filename = self.filename.clone();
         let r = self.store.clone();
 
