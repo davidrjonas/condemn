@@ -6,7 +6,9 @@ use log::info;
 
 pub mod disk;
 pub mod memory;
+pub mod redis;
 
+pub use self::redis::RedisStore;
 pub use disk::DiskStore;
 pub use memory::MemoryStore;
 
@@ -26,6 +28,7 @@ pub trait Store {
 pub enum Stores {
     Memory(MemoryStore),
     Disk(DiskStore<MemoryStore>),
+    Redis(RedisStore),
 }
 
 impl Stores {
@@ -36,6 +39,10 @@ impl Stores {
     pub fn disk(filename: &str) -> Stores {
         Stores::Disk(DiskStore::new(MemoryStore::new(), filename))
     }
+
+    pub fn redis(url: &str) -> Stores {
+        Stores::Redis(RedisStore::new(url))
+    }
 }
 
 impl Store for Stores {
@@ -43,6 +50,7 @@ impl Store for Stores {
         match self {
             Stores::Memory(store) => store.init(),
             Stores::Disk(store) => store.init(),
+            Stores::Redis(store) => store.init(),
         }
     }
 
@@ -50,24 +58,28 @@ impl Store for Stores {
         match self {
             Stores::Memory(store) => store.insert(s),
             Stores::Disk(store) => store.insert(s),
+            Stores::Redis(store) => store.insert(s),
         }
     }
     fn expired(&self, when: DateTime<Utc>) -> Box<Future<Item = Vec<Switch>, Error = ()> + Send> {
         match self {
             Stores::Memory(store) => store.expired(when),
             Stores::Disk(store) => store.expired(when),
+            Stores::Redis(store) => store.expired(when),
         }
     }
     fn take(&self, name: &str) -> Box<Future<Item = Option<Switch>, Error = ()> + Send> {
         match self {
             Stores::Memory(store) => store.take(name),
             Stores::Disk(store) => store.take(name),
+            Stores::Redis(store) => store.take(name),
         }
     }
     fn all(&self) -> Box<Future<Item = Vec<Switch>, Error = ()> + Send> {
         match self {
             Stores::Memory(store) => store.all(),
             Stores::Disk(store) => store.all(),
+            Stores::Redis(store) => store.all(),
         }
     }
 }
