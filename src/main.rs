@@ -174,6 +174,16 @@ fn main() -> Result<(), i16> {
                 .default_value("0.0.0.0:80"),
         )
         .arg(
+            Arg::with_name("store")
+                .short("s")
+                .long("store")
+                .takes_value(true)
+                .possible_values(&["memory", "disk", "redis"])
+                .env("STORE")
+                .help("Which storage type to use. May require other options to be set, such as `--redis-url` or `--db-file`.")
+                .default_value("memory"),
+        )
+        .arg(
             Arg::with_name("redis-url")
                 .short("r")
                 .long("redis-url")
@@ -189,7 +199,8 @@ fn main() -> Result<(), i16> {
                 .long("db-file")
                 .takes_value(true)
                 .env("DB_FILE")
-                .help("Path to persistent data file"),
+                .help("Path to persistent data file")
+                .default_value("condemn.json"),
         )
         .arg(
             Arg::with_name("notify")
@@ -226,11 +237,26 @@ fn main() -> Result<(), i16> {
         .parse()
         .expect("validator missed value of listen");
 
-    let persist = app.value_of("db-file");
+    // ### Store
 
-    let _redis_url = app
+    let store_kind = app
+        .value_of("store")
+        .expect("--store should have a default. This is a bug!");
+
+    let db_filename = app
+        .value_of("db-file")
+        .expect("--db-file should have a default. This is a bug!");
+
+    let redis_url = app
         .value_of("redis-url")
-        .expect("redis-url should have default");
+        .expect("--redis-url should have a default. This is a bug!");
+
+    let store = Arc::new(match store_kind {
+        "memory" => Stores::memory(),
+        "disk" => Stores::disk(db_filename),
+        "redis" => Stores::redis(redis_url),
+        _ => panic!("Unknown store kind"),
+    });
 
     // ### Notifier
 
@@ -255,15 +281,11 @@ fn main() -> Result<(), i16> {
     }
 
     let notifier = Arc::new(notifier);
-    let handle_notifier = Arc::clone(&notifier);
-    let watcher_notifier = Arc::clone(&notifier);
 
     // ### Warp
 
-    let store = Arc::new(match persist {
-        None => Stores::memory(),
-        Some(filename) => Stores::disk(filename),
-    });
+    let handle_notifier = Arc::clone(&notifier);
+    let watcher_notifier = Arc::clone(&notifier);
 
     let init_store = Arc::clone(&store);
     let list_store = Arc::clone(&store);
