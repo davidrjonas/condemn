@@ -43,12 +43,9 @@ Set up
 
 Docker image available at https://hub.docker.com/r/davidrjonas/condemn
 
-Requires redis >= 2.4, necessary for ZREM with multiple keys.
-
 ### Configuration
 
-```
-condemn 0.1.0
+```condemn 0.4.0
 David Jonas <djonas@noip.com>
 
 USAGE:
@@ -59,6 +56,7 @@ FLAGS:
     -V, --version    Prints version information
 
 OPTIONS:
+    -f, --db-file <db-file>                  Path to persistent data file [env: DB_FILE=]  [default: condemn.json]
     -l, --listen <listen>                    The IP and port to listen on. [env: LISTEN=]  [default: 0.0.0.0:80]
     -n, --notify <notify>...                 The notifiers to use. May require other options to be set, such as `sentry-
                                              dsn`. The Command notifier is configured separately, see `--notify-
@@ -70,6 +68,9 @@ OPTIONS:
                                              [default: redis://127.0.0.1:6379]
         --sentry-dsn <sentry-dsn>            Configures `sentry` notifier. If notify includes 'sentry', `sentry-dsn` is
                                              required. [env: SENTRY_DSN=]
+    -s, --store <store>                      Which storage type to use. May require other options to be set, such as
+                                             `--redis-url` or `--db-file`. [env: STORE=]  [default: memory]  [possible
+                                             values: memory, disk, redis]
 ```
 
 Contributing
@@ -86,6 +87,6 @@ Future improvements
 - [X] Sentry notifier
 - [ ] Basic auth with username as prefix to all keys
 - [ ] Other notifiers like Slack, OpsGenie, webhook
-- [ ] Use a transaction with redis / pipeline
-- [ ] Refactor for readability
+- [X] Use a transaction with redis / pipeline
+- [X] Refactor for readability
 - [ ] Add client ip to notifies, other additional context the client may supply, like &ctx={"a":"b"} or &ctx[a]=b&ctx[c]=d
