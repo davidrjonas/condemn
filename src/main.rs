@@ -221,6 +221,7 @@ fn main() -> Result<(), i16> {
                 .takes_value(true)
                 .env("NOTIFY_COMMAND")
                 .validator(valid_notify_command)
+                .required_if("notify", "command")
                 .help("Command to run on notify. CONDEMN_NAME env var will be set. CONDEMN_EARLY env var will be set to the number of seconds, 0 if deadlined."),
         )
         .arg(

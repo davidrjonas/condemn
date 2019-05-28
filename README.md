@@ -45,7 +45,8 @@ Docker image available at https://hub.docker.com/r/davidrjonas/condemn
 
 ### Configuration
 
-```condemn 0.4.0
+```
+condemn 0.4.0
 David Jonas <djonas@noip.com>
 
 USAGE:
@@ -58,9 +59,9 @@ FLAGS:
 OPTIONS:
     -f, --db-file <db-file>                  Path to persistent data file [env: DB_FILE=]  [default: condemn.json]
     -l, --listen <listen>                    The IP and port to listen on. [env: LISTEN=]  [default: 0.0.0.0:80]
-    -n, --notify <notify>...                 The notifiers to use. May require other options to be set, such as `sentry-
-                                             dsn`. The Command notifier is configured separately, see `--notify-
-                                             command`. [env: NOTIFY=]  [possible values: sentry]
+    -n, --notify <notify>...                 The notifiers to use. May require other options to be set, such as
+                                             `--notify-command` or `--sentry-dsn`. [env: NOTIFY=]  [possible values:
+                                             command, sentry]
     -c, --notify-command <notify-command>    Command to run on notify. CONDEMN_NAME env var will be set. CONDEMN_EARLY
                                              env var will be set to the number of seconds, 0 if deadlined. [env:
                                              NOTIFY_COMMAND=]
