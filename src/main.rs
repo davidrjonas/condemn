@@ -33,20 +33,19 @@ pub struct Switch {
     window_start: Option<DateTime<Utc>>,
 }
 
-fn store_check_notify<S: Store>(
+fn store_check_notify<S: Store, N: Notifier>(
     store: Arc<S>,
-    notifier: Arc<AggregateNotifier<'static>>,
+    notifier: Arc<N>,
 ) -> impl Future<Item = (), Error = ()> {
     store.expired(Utc::now()).and_then(move |switches| {
-        switches.iter().for_each(|sw| {
-            info!("sw: {:?}", sw);
-            notifier.notify(sw.name.clone(), None)
-        });
+        switches
+            .iter()
+            .for_each(|sw| notifier.notify(sw.name.clone(), None));
         ok(())
     })
 }
 
-fn notify_on_switch(s: &Switch, notifier: Arc<AggregateNotifier<'static>>, checkin_only: bool) {
+fn notify_on_switch<N: Notifier>(s: &Switch, notifier: Arc<N>, checkin_only: bool) {
     let now = Utc::now();
 
     match s.deadline.cmp(&now) {
@@ -55,7 +54,10 @@ fn notify_on_switch(s: &Switch, notifier: Arc<AggregateNotifier<'static>>, check
             // removed). So we should only notify if it looks like this switch is just checking in
             // and not setting a new switch.
             if checkin_only {
-                warn!("Late check-in; name={}, deadline={}", s.name, s.deadline);
+                warn!(
+                    "Late check-in, this shouldn't happen; name={}, deadline={}",
+                    s.name, s.deadline
+                );
                 notifier.notify(s.name.clone(), None);
             }
         }
@@ -76,16 +78,16 @@ fn notify_on_switch(s: &Switch, notifier: Arc<AggregateNotifier<'static>>, check
     }
 }
 
-fn store_handle<S: Store>(
+fn store_handle<S: Store, N: Notifier>(
     store: Arc<S>,
     name: String,
     opts: Options,
-    notifier: Arc<AggregateNotifier<'static>>,
+    notifier: Arc<N>,
 ) -> impl Future<Item = warp::reply::WithStatus<&'static str>, Error = warp::Rejection> {
     let deadline = opts.deadline.into_inner();
     let window = opts.window.into_inner();
     let checkin_only = deadline.is_none();
-    let later = store.clone();
+    let store_create = store.clone();
 
     store
         .take(&name)
@@ -115,7 +117,7 @@ fn store_handle<S: Store>(
                         window_start: new_window,
                     };
 
-                    Either::B(later.insert(s).map(|_| StatusCode::CREATED))
+                    Either::B(store_create.insert(s).map(|_| StatusCode::CREATED))
                 }
             }
         })
