@@ -26,6 +26,41 @@ impl RedisStore {
     }
 }
 
+fn take_multi(
+    conn: redis::r#async::Connection,
+    names: &[String],
+) -> Box<Future<Item = Vec<Switch>, Error = ()> + Send> {
+    let mut hmget = redis::cmd("HMGET");
+    hmget.arg(SWITCH_KEY);
+    hmget.arg(names.clone());
+
+    let mut hdel = redis::cmd("HDEL");
+    hdel.arg(SWITCH_KEY);
+    hdel.arg(names.clone());
+
+    let mut zrem = redis::cmd("ZREM");
+    zrem.arg(ORDERED_KEY);
+    zrem.arg(names);
+
+    let mut p = redis::pipe();
+    p.atomic();
+    p.add_command(&hmget);
+    p.add_command(&hdel).ignore();
+    p.add_command(&zrem).ignore();
+
+    let res = p
+        .query_async(conn)
+        .map_err(|e| warn!("redis failure; {:?}", e))
+        .map(|(_, jsons): (_, Vec<String>)| {
+            jsons
+                .iter()
+                .filter_map(|s| deserialize_switch(&s))
+                .collect()
+        });
+
+    Box::new(res)
+}
+
 fn deserialize_switch(json: &str) -> Option<Switch> {
     match serde_json::from_str(json) {
         Ok(switch) => Some(switch),
@@ -82,35 +117,12 @@ impl Store for RedisStore {
         expired.add_command(&zrange);
         expired.add_command(&zrem).ignore();
 
-        let getfn = |expired: Vec<String>| {
-            let mut hmget = redis::cmd("HMGET");
-            hmget.arg(SWITCH_KEY);
-            hmget.arg(expired.clone());
-
-            let mut hdel = redis::cmd("HDEL");
-            hdel.arg(SWITCH_KEY);
-            hdel.arg(expired);
-
-            let mut p = redis::pipe();
-            p.atomic();
-            p.add_command(&hmget);
-            p.add_command(&hdel).ignore();
-
-            p
-        };
-
         let res = self
             .client
             .get_async_connection()
             .and_then(move |conn| expired.query_async(conn))
-            .and_then(move |(conn, expired): (_, Vec<String>)| getfn(expired).query_async(conn))
             .map_err(|e| warn!("redis failure; {:?}", e))
-            .map(|(_, jsons): (_, Vec<String>)| {
-                jsons
-                    .iter()
-                    .filter_map(|s| deserialize_switch(&s))
-                    .collect()
-            });
+            .and_then(move |(conn, expired): (_, Vec<String>)| take_multi(conn, &expired));
 
         Box::new(res)
     }
@@ -146,33 +158,15 @@ impl Store for RedisStore {
     }
 
     fn take(&self, name: &str) -> Box<Future<Item = Option<Switch>, Error = ()> + Send> {
-        let mut hget = redis::cmd("HGET");
-        hget.arg(SWITCH_KEY);
-        hget.arg(name);
+        let name = name.to_owned();
 
-        let mut hrem = redis::cmd("HREM");
-        hrem.arg(SWITCH_KEY);
-        hrem.arg(name);
-
-        let mut zrem = redis::cmd("ZREM");
-        zrem.arg(ORDERED_KEY);
-        zrem.arg(name);
-
-        let mut p = redis::pipe();
-        p.atomic();
-        p.add_command(&hget);
-        p.add_command(&hrem).ignore();
-        p.add_command(&zrem).ignore();
-
-        let res = self
-            .client
-            .get_async_connection()
-            .and_then(move |conn| p.query_async(conn))
-            .map_err(|e| warn!("redis failure; {:?}", e))
-            .map(|(_, maybe_json): (_, Option<String>)| {
-                maybe_json.map(|s| deserialize_switch(&s)).and_then(|y| y)
-            });
-
-        Box::new(res)
+        Box::new(
+            self.client
+                .get_async_connection()
+                .map_err(|e| warn!("redis failure; {:?}", e))
+                .and_then(move |conn| {
+                    take_multi(conn, &[name]).map(|list| list.into_iter().next())
+                }),
+        )
     }
 }
