@@ -11,6 +11,14 @@ pub struct Command {
     pub cmd: Vec<String>,
 }
 
+impl Command {
+    pub fn new(command: &str) -> Self {
+        let cmd = shell_words::split(command)
+            .expect("notify command should have been validated. This is a bug.");
+        Self { cmd }
+    }
+}
+
 impl Notifier for Command {
     fn notify(&self, name: String, early: Option<u64>) {
         info!("running notify command: cmd={}", self.cmd.join(" "));

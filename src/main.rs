@@ -208,9 +208,9 @@ fn main() -> Result<(), i16> {
                 .long("notify")
                 .takes_value(true)
                 .multiple(true)
-                .possible_values(&["sentry"])
+                .possible_values(&["command", "sentry"])
                 .env("NOTIFY")
-                .help("The notifiers to use. May require other options to be set, such as `sentry-dsn`. The Command notifier is configured separately, see `--notify-command`."),
+                .help("The notifiers to use. May require other options to be set, such as `--notify-command` or `--sentry-dsn`."),
         )
         .arg(
             Arg::with_name("notify-command")
@@ -261,16 +261,15 @@ fn main() -> Result<(), i16> {
     // ### Notifier
 
     let mut notifier = AggregateNotifier::new();
-    notifier.push(notifiers::LogNotifier {});
 
-    if let Some(s) = app.value_of("notify-command") {
-        let cmd = shell_words::split(s)
-            .expect("notify command should have been validated. This is a bug.");
-        notifier.push(notifiers::CommandNotifier { cmd });
-    }
+    notifier.push(notifiers::LogNotifier {});
 
     for notify in app.values_of("notify").unwrap_or_default() {
         match notify {
+            "command" => notifier.push(notifiers::CommandNotifier::new(
+                app.value_of("notify-command")
+                    .expect("notify command should have been validated. This is a bug."),
+            )),
             "sentry" => notifier.push(notifiers::SentryNotifier::from_dsn(
                 app.value_of("sentry-dsn")
                     .expect("required if sentry is set"),
@@ -280,7 +279,7 @@ fn main() -> Result<(), i16> {
         }
     }
 
-    let notifier = Arc::new(notifier);
+    let notifier = Arc::new(notifier); // removes the mut
 
     // ### Warp
 
